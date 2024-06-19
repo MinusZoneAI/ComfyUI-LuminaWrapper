@@ -1,3 +1,4 @@
+from argparse import Namespace
 import torch
 import os
 import sys
@@ -30,6 +31,53 @@ try:
 except:
     FLASH_ATTN_AVAILABLE = False
     print("LuminaWrapper: WARNING! Flash Attention is not available, using much slower torch SDP attention")
+ 
+
+class LoadLuminaModelFile:
+    @classmethod
+    def INPUT_TYPES(s): 
+        return {
+            "required": {
+                "ckpt_name": (folder_paths.get_filename_list("checkpoints"), ),  
+                "model_args_name": (folder_paths.get_filename_list("checkpoints"), ),
+            },
+        }
+
+    RETURN_TYPES = ("LUMINAMODEL",)
+    RETURN_NAMES = ("lumina_model",)
+    FUNCTION = "loadmodel"
+    CATEGORY = "LuminaWrapper"
+
+    def loadmodel(self, ckpt_name, model_args_name):
+        device = mm.get_torch_device()
+        offload_device = mm.unet_offload_device() 
+
+
+        ckpt_path = folder_paths.get_full_path("checkpoints", ckpt_name)
+        model_args_path = folder_paths.get_full_path("checkpoints", model_args_name)
+         
+                  
+        train_args = torch.load(model_args_path)
+
+        with (init_empty_weights() if is_accelerate_available else nullcontext()):
+            model = lumina_models.__dict__[train_args.model](qk_norm=train_args.qk_norm, cap_feat_dim=2048)
+        model.eval().to(torch.float16)
+
+        sd = load_torch_file(ckpt_path)
+        if is_accelerate_available:
+            for key in sd:
+                set_module_tensor_to_device(model, key, device=offload_device, value=sd[key])
+        else:
+            model.load_state_dict(sd, strict=True)
+        
+        lumina_model = {
+            'model': model, 
+            'train_args': train_args,
+            'dtype': torch.float16
+        }
+
+        return (lumina_model,)
+
 
 class DownloadAndLoadLuminaModel:
     @classmethod
@@ -92,6 +140,7 @@ class DownloadAndLoadLuminaModel:
 
         return (lumina_model,)
 
+
 class DownloadAndLoadGemmaModel:
     @classmethod
     def INPUT_TYPES(s):
@@ -152,7 +201,6 @@ class DownloadAndLoadGemmaModel:
         gemma_model = {
             'tokenizer': tokenizer,
             'text_encoder': text_encoder,
-
         }
 
         return (gemma_model,)
@@ -487,6 +535,7 @@ class LuminaT2ISampler:
      
 NODE_CLASS_MAPPINGS = {
     "LuminaT2ISampler": LuminaT2ISampler,
+    "LoadLuminaModelFile": LoadLuminaModelFile, 
     "DownloadAndLoadLuminaModel": DownloadAndLoadLuminaModel,
     "DownloadAndLoadGemmaModel": DownloadAndLoadGemmaModel,
     "LuminaGemmaTextEncode": LuminaGemmaTextEncode,
@@ -495,6 +544,7 @@ NODE_CLASS_MAPPINGS = {
     "GemmaSampler": GemmaSampler
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "LoadLuminaModelFile": "Load Lumina Model File",
     "LuminaT2ISampler": "Lumina T2I Sampler",
     "DownloadAndLoadLuminaModel": "DownloadAndLoadLuminaModel",
     "DownloadAndLoadGemmaModel": "DownloadAndLoadGemmaModel",
