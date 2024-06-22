@@ -110,8 +110,9 @@ class DownloadAndLoadLuminaModel:
 
         model_name = model.rsplit('/', 1)[-1]
         model_path = os.path.join(folder_paths.models_dir, "lumina", model_name)
+        safetensors_path = os.path.join(model_path, "consolidated.00-of-01.safetensors")
         
-        if not os.path.exists(model_path):
+        if not os.path.exists(safetensors_path):
             print(f"Downloading Lumina model to: {model_path}")
             from huggingface_hub import snapshot_download
             snapshot_download(repo_id=model,
@@ -125,12 +126,14 @@ class DownloadAndLoadLuminaModel:
             model = lumina_models.__dict__[train_args.model](qk_norm=train_args.qk_norm, cap_feat_dim=2048)
         model.eval().to(dtype)
 
-        sd = load_torch_file(os.path.join(model_path, "consolidated.00-of-01.safetensors"))
+        sd = load_torch_file(safetensors_path)
         if is_accelerate_available:
             for key in sd:
-                set_module_tensor_to_device(model, key, device=offload_device, value=sd[key])
+                set_module_tensor_to_device(model, key, dtype=dtype, device=offload_device, value=sd[key])
         else:
             model.load_state_dict(sd, strict=True)
+        del sd
+        mm.soft_empty_cache()
         
         lumina_model = {
             'model': model, 
@@ -156,7 +159,6 @@ class DownloadAndLoadGemmaModel:
                     "default": 'text_encode'
                     }),
             }
-
         }
 
     RETURN_TYPES = ("GEMMAODEL",)
@@ -183,20 +185,14 @@ class DownloadAndLoadGemmaModel:
 
         attn_implementation = "flash_attention_2" if FLASH_ATTN_AVAILABLE and precision != "fp32" else "sdpa"
         print(f"Gemma attention mode: {attn_implementation}")
-        if mode == 'text_encode':
-            text_encoder = AutoModel.from_pretrained(
-                gemma_path, 
-                torch_dtype=dtype, 
-                device_map=device, 
-                attn_implementation=attn_implementation,
-                ).eval()
-        elif mode == 'LLM':
-            text_encoder = GemmaForCausalLM.from_pretrained(
-                gemma_path,
-                torch_dtype=dtype, 
-                device_map=device,
-                attn_implementation=attn_implementation
-                ).eval()
+
+        model_class = AutoModel if mode == 'text_encode' else GemmaForCausalLM
+        text_encoder = model_class.from_pretrained(
+            gemma_path, 
+            torch_dtype=dtype, 
+            device_map=device, 
+            attn_implementation=attn_implementation,
+        ).eval()
 
         gemma_model = {
             'tokenizer': tokenizer,
@@ -228,6 +224,8 @@ class LuminaGemmaTextEncode:
     def encode(self, gemma_model, latent, prompt, n_prompt, keep_model_loaded=False):
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
+        mm.unload_all_models()
+        mm.soft_empty_cache()
 
         tokenizer = gemma_model['tokenizer']
         text_encoder = gemma_model['text_encoder']
@@ -257,6 +255,8 @@ class LuminaGemmaTextEncode:
         if not keep_model_loaded:
             print("Offloading text encoder...")
             text_encoder.to(offload_device)
+            mm.soft_empty_cache()
+            gc.collect()
         lumina_embeds = {
             'prompt_embeds': prompt_embeds,
             'prompt_masks': prompt_masks,
@@ -271,8 +271,8 @@ class LuminaTextAreaAppend:
             "required": {
                 
                 "prompt": ("STRING", {"multiline": True, "default": "",}),
-                "row": ("INT", {"default": 1, "min": 1, "max": 4, "step": 1}),
-                "column": ("INT", {"default": 1, "min": 1, "max": 4, "step": 1}),
+                "row": ("INT", {"default": 1, "min": 1, "max": 8, "step": 1}),
+                "column": ("INT", {"default": 1, "min": 1, "max": 8, "step": 1}),
             },
             "optional": {
                 "prev_prompt": ("LUMINAAREAPROMPT", ),
@@ -328,10 +328,7 @@ class LuminaGemmaTextEncodeArea:
         text_encoder.to(device)
 
         prompt_list = [entry['prompt'] + "," + append_prompt for entry in lumina_area_prompt]
-       
-
         global_prompt = " ".join(prompt_list)
-        #global_prompt = global_prompt + " " + append_prompt
         prompts = prompt_list + [n_prompt] + [global_prompt]
         print("prompts: ", prompts)
 
@@ -388,6 +385,9 @@ class GemmaSampler:
         device = mm.get_torch_device()
         offload_device = mm.unet_offload_device()
 
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+
         tokenizer = gemma_model['tokenizer']
         model = gemma_model['text_encoder']
         model.to(device)
@@ -410,6 +410,8 @@ class GemmaSampler:
         if not keep_model_loaded:
             print("Offloading text encoder...")
             model.to(offload_device)
+            mm.soft_empty_cache()
+            gc.collect()
         
         return (decoded,)
 
